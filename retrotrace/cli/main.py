@@ -300,6 +300,49 @@ def cmd_diff(trace_id_1: str, trace_id_2: str, db_path: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Command: studio
+# ---------------------------------------------------------------------------
+
+def cmd_studio(db_path: str, port: int, host: str = "127.0.0.1",
+               no_browser: bool = False) -> None:
+    """Launch the RetroTrace Developer Studio (FastAPI + uvicorn)."""
+    import webbrowser
+    import threading
+
+    try:
+        import uvicorn
+        from retrotrace.server.app import create_app
+        from retrotrace.storage.ledger import ExecutionLedger as _Ledger
+    except ImportError as exc:
+        console.print(
+            f"[red]Missing dependency:[/red] {exc}\n"
+            "Run [bold]pip install -e .[/bold] to add FastAPI/uvicorn."
+        )
+        sys.exit(1)
+
+    url = f"http://{host}:{port}"
+    console.print(
+        f"\n[bold cyan]RetroTrace Developer Studio[/bold cyan]\n"
+        f"  Studio   : [link={url}]{url}[/link]\n"
+        f"  API docs : [link={url}/api/docs]{url}/api/docs[/link]\n"
+        f"  DB       : [dim]{db_path}[/dim]\n"
+        f"\nPress [bold]Ctrl-C[/bold] to stop.\n"
+    )
+
+    ledger = _Ledger(db_path=db_path)
+    app = create_app(ledger)
+
+    if not no_browser:
+        def _open() -> None:
+            import time as _time
+            _time.sleep(1.0)
+            webbrowser.open(url)
+        threading.Thread(target=_open, daemon=True).start()
+
+    uvicorn.run(app, host=host, port=port, log_level="info")
+
+
+# ---------------------------------------------------------------------------
 # Argument parser & entry point
 # ---------------------------------------------------------------------------
 
@@ -330,6 +373,20 @@ def _build_parser() -> argparse.ArgumentParser:
     p_diff.add_argument("trace_id_1", help="First trace UUID")
     p_diff.add_argument("trace_id_2", help="Second trace UUID")
 
+    # ── studio ────────────────────────────────────────────────────────────
+    p_studio = sub.add_parser(
+        "studio",
+        help="Launch the RetroTrace Developer Studio web UI (FastAPI + uvicorn)",
+    )
+    p_studio.add_argument(
+        "--port", type=int, default=8000, metavar="PORT",
+        help="Port to bind the server on (default: 8000)",
+    )
+    p_studio.add_argument(
+        "--host", default="127.0.0.1", metavar="HOST",
+        help="Host/interface to bind (default: 127.0.0.1)",
+    )
+
     return parser
 
 
@@ -347,6 +404,8 @@ def main(argv: Optional[List[str]] = None) -> None:
             cmd_inspect(args.trace_id, db)
         elif args.command == "diff":
             cmd_diff(args.trace_id_1, args.trace_id_2, db)
+        elif args.command == "studio":
+            cmd_studio(db, port=args.port, host=args.host)
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(130)
