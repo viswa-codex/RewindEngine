@@ -18,6 +18,9 @@ dev = [
     "pytest-asyncio>=0.23.0",
 ]
 
+[project.scripts]
+retrotrace = "retrotrace.cli.main:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["retrotrace*"]
