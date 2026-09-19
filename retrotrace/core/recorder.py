@@ -39,6 +39,14 @@ current_parent_id: ContextVar[Optional[str]] = ContextVar(
     "current_parent_id", default=None
 )
 
+# Set to True while a ReplayEngine.replay_trace() call is in progress.
+is_replaying: ContextVar[bool] = ContextVar("is_replaying", default=False)
+
+# Holds a reference to the active ReplayEngine so @record / @mock_side_effect
+# can call back into it without circular imports at module level.
+# Type is Any to avoid a forward-reference import cycle.
+replay_engine: ContextVar[Any] = ContextVar("replay_engine", default=None)
+
 # ---------------------------------------------------------------------------
 # Singleton / configurable default ledger
 # ---------------------------------------------------------------------------
@@ -192,6 +200,13 @@ def record(
 def _sync_wrapper(fn: Callable, explicit_ledger: Optional[ExecutionLedger]) -> Callable:
     @functools.wraps(fn)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # ── Replay mode ──────────────────────────────────────────────────────
+        if is_replaying.get():
+            engine = replay_engine.get()
+            if engine is not None:
+                return engine.consume(fn, args, kwargs, is_async=False)
+
+        # ── Live recording mode ───────────────────────────────────────────────
         _ledger = explicit_ledger or _get_default_ledger()
         event_id = str(uuid.uuid4())
         trace_id = current_trace_id.get() or str(uuid.uuid4())
@@ -243,6 +258,13 @@ def _sync_wrapper(fn: Callable, explicit_ledger: Optional[ExecutionLedger]) -> C
 def _async_wrapper(fn: Callable, explicit_ledger: Optional[ExecutionLedger]) -> Callable:
     @functools.wraps(fn)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        # ── Replay mode ──────────────────────────────────────────────────────
+        if is_replaying.get():
+            engine = replay_engine.get()
+            if engine is not None:
+                return await engine.consume(fn, args, kwargs, is_async=True)
+
+        # ── Live recording mode ───────────────────────────────────────────────
         _ledger = explicit_ledger or _get_default_ledger()
         event_id = str(uuid.uuid4())
         trace_id = current_trace_id.get() or str(uuid.uuid4())
