@@ -347,6 +347,98 @@ table.dt{width:100%;border-collapse:collapse;font-size:11.5px;}
 }
 #toast.show{transform:translateY(0);}
 #toast.err{border-color:var(--vsc-red);}
+/* ── View-toggle pills (Call Tree | Flamegraph) ─────────────────── */
+#view-toggle{
+  display:flex;align-items:center;gap:1px;
+  background:var(--vsc-border);border-radius:4px;overflow:hidden;
+  margin-left:8px;flex-shrink:0;
+}
+.vt-pill{
+  padding:3px 11px;font-size:11px;cursor:pointer;
+  background:transparent;border:none;color:var(--vsc-muted);
+  transition:background .1s,color .1s;
+}
+.vt-pill.active{background:var(--vsc-accent);color:#fff;}
+.vt-pill:hover:not(.active){background:var(--vsc-input-bg);color:var(--vsc-text);}
+
+/* ── Flamegraph panel ────────────────────────────────────────────── */
+#fg-panel{
+  display:none;flex:1;flex-direction:column;overflow:hidden;
+  background:var(--vsc-editor);
+}
+#fg-panel.open{display:flex;}
+#fg-hdr{
+  padding:6px 14px;background:#252526;border-bottom:1px solid var(--vsc-border);
+  display:flex;align-items:center;gap:10px;flex-shrink:0;font-size:11px;
+  color:var(--vsc-muted);
+}
+#fg-legend{display:flex;gap:12px;margin-left:auto;}
+.fgl{display:flex;align-items:center;gap:5px;font-size:10px;}
+.fgl-dot{width:10px;height:10px;border-radius:2px;flex-shrink:0;}
+/* Time axis ruler */
+#fg-ruler{
+  position:relative;height:18px;background:#1a1a1a;
+  border-bottom:1px solid var(--vsc-border);flex-shrink:0;
+  overflow:hidden;
+}
+.fg-tick{
+  position:absolute;top:0;bottom:0;width:1px;background:#333;
+}
+.fg-tick-lbl{
+  position:absolute;top:2px;font-size:9px;color:var(--vsc-muted);
+  transform:translateX(-50%);white-space:nowrap;
+}
+/* Waterfall canvas */
+#fg-scroll{
+  flex:1;overflow:auto;position:relative;
+  /* left margin for depth gutter */
+}
+#fg-rows{
+  position:relative;min-height:100%;
+  padding:6px 14px 20px 14px;
+}
+/* Each depth row is a horizontal lane */
+.fg-lane{
+  position:relative;height:28px;margin-bottom:2px;
+}
+.fg-bar{
+  position:absolute;top:3px;height:22px;border-radius:3px;
+  cursor:pointer;overflow:hidden;white-space:nowrap;
+  display:flex;align-items:center;padding:0 6px;
+  font-family:var(--font-code);font-size:11px;
+  transition:filter .1s, outline .1s;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.08);
+}
+/* Colour variants */
+.fg-bar.normal  {background:#1a4a6e;color:#9cdcfe;border:1px solid #1f6ea0;}
+.fg-bar.error   {background:#5a1a1a;color:#f88;  border:1px solid #8a2020;}
+.fg-bar.sideeff {background:#3a1a5a;color:#c586c0;border:1px solid #6a30a0;}
+.fg-bar:hover   {filter:brightness(1.35);}
+.fg-bar.active  {outline:2px solid var(--vsc-accent);outline-offset:-1px;filter:brightness(1.4);}
+.fg-bar-label   {overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;}
+.fg-bar-dur     {flex-shrink:0;margin-left:6px;opacity:.7;font-size:10px;}
+
+/* Depth-gutter labels (row numbers on left edge) */
+.fg-depth-lbl{
+  position:absolute;left:0;top:50%;transform:translateY(-50%);
+  width:12px;font-size:9px;color:var(--vsc-muted);text-align:right;
+  pointer-events:none;
+}
+/* Tooltip */
+#fg-tooltip{
+  position:fixed;display:none;background:#252526;
+  border:1px solid var(--vsc-border);border-radius:4px;
+  padding:7px 11px;font-size:11px;color:var(--vsc-text);
+  pointer-events:none;z-index:100;min-width:200px;max-width:320px;
+  line-height:18px;box-shadow:0 4px 16px rgba(0,0,0,.5);
+}
+#fg-tooltip .ft-fn{font-family:var(--font-code);color:var(--vsc-yellow);
+                    font-weight:700;font-size:12px;}
+#fg-tooltip .ft-row{display:flex;justify-content:space-between;gap:12px;}
+#fg-tooltip .ft-lbl{color:var(--vsc-muted);}
+#fg-tooltip .ft-val{color:var(--vsc-text);}
+/* Ruler ticks for % marks */
+#fg-ruler{padding-left:14px;}
 </style>
 </head>
 <body>
@@ -398,6 +490,12 @@ table.dt{width:100%;border-collapse:collapse;font-size:11.5px;}
     <label>Diff vs:</label>
     <select id="diff-sel"><option value="">— select —</option></select>
     <button id="btn-diff-run" onclick="runDiff()">Diff</button>
+  </div>
+  <div class="dbg-sep"></div>
+  <!-- View toggle -->
+  <div id="view-toggle">
+    <button class="vt-pill active" id="vt-tree" onclick="switchView('tree')">Call Tree</button>
+    <button class="vt-pill"        id="vt-fg"   onclick="switchView('fg')">Flamegraph</button>
   </div>
 </div>
 
@@ -453,6 +551,31 @@ table.dt{width:100%;border-collapse:collapse;font-size:11.5px;}
       </div>
     </div>
 
+    <!-- Flamegraph / Waterfall panel -->
+    <div id="fg-panel">
+      <!-- Header + legend -->
+      <div id="fg-hdr">
+        <span>FLAMEGRAPH &amp; WATERFALL</span>
+        <span id="fg-info" style="color:var(--vsc-comment)"></span>
+        <div id="fg-legend">
+          <div class="fgl"><div class="fgl-dot" style="background:#1a4a6e;border:1px solid #1f6ea0"></div>Function</div>
+          <div class="fgl"><div class="fgl-dot" style="background:#3a1a5a;border:1px solid #6a30a0"></div>Side-effect</div>
+          <div class="fgl"><div class="fgl-dot" style="background:#5a1a1a;border:1px solid #8a2020"></div>Error</div>
+        </div>
+      </div>
+      <!-- Time axis ruler -->
+      <div id="fg-ruler"></div>
+      <!-- Waterfall rows -->
+      <div id="fg-scroll">
+        <div id="fg-rows">
+          <div class="empty-state" style="padding:40px 0">
+            <div class="es-icon" style="font-size:36px">▭</div>
+            <div class="es-msg">Select a trace to render flamegraph</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Diff panel (replaces inspector when active) -->
     <div id="diff-panel">
       <div id="diff-hdr">
@@ -494,6 +617,13 @@ table.dt{width:100%;border-collapse:collapse;font-size:11.5px;}
 
 </div><!-- #app -->
 <div id="toast"></div>
+<div id="fg-tooltip">
+  <div class="ft-fn" id="ftt-fn"></div>
+  <div class="ft-row"><span class="ft-lbl">Duration</span><span class="ft-val" id="ftt-dur"></span></div>
+  <div class="ft-row"><span class="ft-lbl">Start offset</span><span class="ft-val" id="ftt-off"></span></div>
+  <div class="ft-row"><span class="ft-lbl">Depth</span><span class="ft-val" id="ftt-dep"></span></div>
+  <div class="ft-row"><span class="ft-lbl">Module</span><span class="ft-val" id="ftt-mod"></span></div>
+</div>
 
 <script>
 /* ════════════════════════════════════════════════════════════════════
@@ -506,6 +636,8 @@ let filteredTraces = [];
 let activeTrace  = null;   // TraceDetail
 let activeStep   = 0;
 let timeline     = [];     // flat EventSchema[]
+let flamegraph   = [];     // FlamegraphBar[] from API
+let currentView  = 'tree'; // 'tree' | 'fg'
 
 // ── Boot ───────────────────────────────────────────────────────────
 window.addEventListener('DOMContentLoaded', () => {
@@ -596,8 +728,9 @@ async function selectTrace(traceId) {
     closeDiff();
     const detail = await api(`/api/traces/${traceId}`);
     activeTrace = detail;
-    timeline = detail.events || [];
-    activeStep = 0;
+    timeline    = detail.events     || [];
+    flamegraph  = detail.flamegraph || [];
+    activeStep  = 0;
 
     // sidebar highlight
     document.querySelectorAll('.trace-row').forEach(r =>
@@ -616,6 +749,7 @@ async function selectTrace(traceId) {
     enableControls(timeline.length);
     renderTimeline();
     renderTree(detail.tree || []);
+    renderFlamegraph(flamegraph, detail.total_duration_ms);
     renderFrame(timeline[0] || null);
     updateBreadcrumb(timeline[0]);
     document.getElementById('sb-engine').textContent = 'Engine: loaded';
@@ -645,6 +779,7 @@ function scrubTo(idx) {
   renderFrame(timeline[idx]);
   updateBreadcrumb(timeline[idx]);
   highlightTree(timeline[idx]?.event_id);
+  highlightFlamegraphBar(timeline[idx]?.event_id);
 }
 
 function stepBy(d) { scrubTo(activeStep + d); }
@@ -852,16 +987,154 @@ async function runDiff() {
 
 function closeDiff() {
   document.getElementById('diff-panel').classList.remove('open');
-  document.getElementById('inspector').style.display = '';
-  document.getElementById('tree-pane').style.display = '';
+  // restore whichever view was active before diff opened
+  if (currentView === 'fg') {
+    document.getElementById('fg-panel').classList.add('open');
+    document.getElementById('tree-pane').style.display  = 'none';
+    document.getElementById('inspector').style.display  = 'none';
+  } else {
+    document.getElementById('fg-panel').classList.remove('open');
+    document.getElementById('inspector').style.display = '';
+    document.getElementById('tree-pane').style.display = '';
+  }
 }
 
-// ── View switching (activity bar) ──────────────────────────────────
+// ── View switching ─────────────────────────────────────────────────
+function switchView(v) {
+  currentView = v;
+  const isTree = v === 'tree';
+  document.getElementById('vt-tree').classList.toggle('active', isTree);
+  document.getElementById('vt-fg').classList.toggle('active', !isTree);
+
+  // tree-pane + inspector vs flamegraph panel
+  document.getElementById('tree-pane').style.display  = isTree ? '' : 'none';
+  document.getElementById('inspector').style.display  = isTree ? '' : 'none';
+  document.getElementById('fg-panel').classList.toggle('open', !isTree);
+
+  // If switching to fg and we have data, render it
+  if (!isTree && flamegraph.length && activeTrace) {
+    renderFlamegraph(flamegraph, activeTrace.total_duration_ms);
+  }
+}
+
+// Legacy activity-bar setView — just toggle closeDiff and handle diff icon
 function setView(v) {
   document.querySelectorAll('.act-icon').forEach(el => el.classList.remove('active'));
   event.currentTarget.classList.add('active');
   if (v === 'diff' && activeTrace) runDiff();
   if (v === 'explorer' || v === 'debug') closeDiff();
+}
+
+// ── Flamegraph renderer ────────────────────────────────────────────
+function renderFlamegraph(bars, totalDurationMs) {
+  const rows  = document.getElementById('fg-rows');
+  const ruler = document.getElementById('fg-ruler');
+  const info  = document.getElementById('fg-info');
+
+  rows.innerHTML = '';
+
+  if (!bars || !bars.length) {
+    rows.innerHTML = '<div class="empty-state" style="padding:40px 0">' +
+      '<div class="es-icon" style="font-size:36px">▭</div>' +
+      '<div class="es-msg">Select a trace to render flamegraph</div></div>';
+    return;
+  }
+
+  info.textContent = `${bars.length} events · ${totalDurationMs.toFixed(2)} ms total`;
+
+  // Build time ruler (10 ticks at 10% intervals)
+  ruler.innerHTML = '';
+  for (let pct = 0; pct <= 100; pct += 10) {
+    const tick = document.createElement('div');
+    tick.className = 'fg-tick';
+    tick.style.left = `calc(14px + ${pct}% * ((100% - 28px) / 100))`;
+    ruler.appendChild(tick);
+
+    const lbl = document.createElement('span');
+    lbl.className = 'fg-tick-lbl';
+    lbl.textContent = (pct === 0) ? '0' : `${(totalDurationMs * pct / 100).toFixed(1)}ms`;
+    lbl.style.left = `calc(14px + ${pct}% * ((100% - 28px) / 100))`;
+    ruler.appendChild(lbl);
+  }
+
+  // Group bars by depth into lanes
+  const maxDepth = Math.max(...bars.map(b => b.depth));
+  const lanes = {};
+  bars.forEach(b => {
+    if (!lanes[b.depth]) lanes[b.depth] = [];
+    lanes[b.depth].push(b);
+  });
+
+  const tooltip = document.getElementById('fg-tooltip');
+
+  for (let d = 0; d <= maxDepth; d++) {
+    if (!lanes[d]) continue;
+    const lane = document.createElement('div');
+    lane.className = 'fg-lane';
+    lane.dataset.depth = d;
+
+    lanes[d].forEach(bar => {
+      // Map offset_pct / width_pct to pixel layout within the row area
+      // row has left padding 14px, we use % of available width
+      const barEl = document.createElement('div');
+      const colorClass = bar.has_error ? 'error' : bar.is_side_effect ? 'sideeff' : 'normal';
+      barEl.className = `fg-bar ${colorClass}`;
+      barEl.dataset.eid = bar.event_id;
+      barEl.style.left  = `${bar.offset_pct}%`;
+      barEl.style.width = `${bar.width_pct}%`;
+      barEl.innerHTML =
+        `<span class="fg-bar-label">${esc(bar.function_name)}</span>` +
+        `<span class="fg-bar-dur">${bar.duration_ms.toFixed(2)}ms</span>`;
+
+      // Click: jump scrubber to this event
+      barEl.addEventListener('click', e => {
+        e.stopPropagation();
+        const idx = timeline.findIndex(ev => ev.event_id === bar.event_id);
+        if (idx >= 0) scrubTo(idx);
+        // Auto-switch to tree view so inspector is visible
+        if (currentView === 'fg') {
+          // Keep flamegraph visible but sync inspector by temporarily showing it
+          // The user can use the inspector in Call Tree view
+        }
+      });
+
+      // Hover tooltip
+      barEl.addEventListener('mouseenter', e => {
+        document.getElementById('ftt-fn').textContent  = bar.function_name;
+        document.getElementById('ftt-dur').textContent = bar.duration_ms.toFixed(3) + ' ms';
+        document.getElementById('ftt-off').textContent = bar.offset_pct.toFixed(2) + '%';
+        document.getElementById('ftt-dep').textContent = bar.depth;
+        document.getElementById('ftt-mod').textContent = bar.module_path;
+        tooltip.style.display = 'block';
+        posTooltip(e);
+      });
+      barEl.addEventListener('mousemove', posTooltip);
+      barEl.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; });
+
+      lane.appendChild(barEl);
+    });
+
+    rows.appendChild(lane);
+  }
+}
+
+function posTooltip(e) {
+  const tip = document.getElementById('fg-tooltip');
+  const W = window.innerWidth, H = window.innerHeight;
+  let x = e.clientX + 14, y = e.clientY + 14;
+  if (x + 320 > W) x = e.clientX - 330;
+  if (y + 120 > H) y = e.clientY - 130;
+  tip.style.left = x + 'px';
+  tip.style.top  = y + 'px';
+}
+
+function highlightFlamegraphBar(eventId) {
+  document.querySelectorAll('.fg-bar').forEach(b => {
+    b.classList.toggle('active', b.dataset.eid === eventId);
+    if (b.dataset.eid === eventId) {
+      b.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  });
 }
 
 // ── Utils ──────────────────────────────────────────────────────────
