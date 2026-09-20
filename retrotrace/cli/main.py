@@ -1,12 +1,8 @@
 """
 retrotrace/cli/main.py
-Rich-powered terminal UI for RetroTrace.
+Unified CLI entry point for RetroTrace.
 
-Commands
---------
-  retrotrace list [--db PATH]
-  retrotrace inspect <trace_id> [--db PATH]
-  retrotrace diff <trace_id_1> <trace_id_2> [--db PATH]
+Commands: list, inspect, diff, studio
 """
 
 from __future__ import annotations
@@ -14,98 +10,63 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from typing import Dict, List, Optional
+from typing import List, Optional
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from rich.text import Text
 from rich.tree import Tree
-from rich import box
 
-from retrotrace.storage.ledger import ExecutionEvent, ExecutionLedger
+from retrotrace.storage.ledger import ExecutionLedger
 
 console = Console()
 
 _DEFAULT_DB = ".retrotrace.db"
 
+
 # ---------------------------------------------------------------------------
-# Formatting helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
-def _status_icon(has_error: bool) -> Text:
-    if has_error:
-        return Text("✗", style="bold red")
-    return Text("✓", style="bold green")
+def _status_icon(has_error: bool):
+    from rich.text import Text
+    return Text("✗", style="bold red") if has_error else Text("✓", style="bold green")
 
 
 def _fmt_dt(dt) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else "—"
 
 
-def _fmt_inputs(inputs: dict) -> str:
-    try:
-        return json.dumps(inputs, indent=2)
-    except Exception:
-        return repr(inputs)
-
-
-def _fmt_output(output) -> str:
-    if output is None:
-        return "[dim]None[/dim]"
-    try:
-        return json.dumps(output, indent=2)
-    except Exception:
-        return repr(output)
-
-
-def _truncate(s: str, max_len: int = 120) -> str:
-    if len(s) <= max_len:
-        return s
-    return s[: max_len - 3] + "..."
-
-
-def _error_snippet(error: str, max_lines: int = 4) -> str:
-    """Return the last *max_lines* lines of a traceback string."""
-    lines = [l for l in error.strip().splitlines() if l.strip()]
-    return "\n".join(lines[-max_lines:])
+def _truncate(s: str, n: int = 120) -> str:
+    return s if len(s) <= n else s[: n - 3] + "..."
 
 
 # ---------------------------------------------------------------------------
-# Command: list
+# list
 # ---------------------------------------------------------------------------
 
 def cmd_list(db_path: str) -> None:
-    """Display a summary table of all recorded traces."""
     with ExecutionLedger(db_path=db_path) as ledger:
         traces = ledger.list_traces()
 
     if not traces:
-        console.print(
-            Panel(
-                "[dim]No traces recorded yet.[/dim]\n"
-                "Decorate your functions with [bold cyan]@record[/bold cyan] and run them.",
-                title="RetroTrace — Traces",
-                border_style="dim",
-            )
-        )
+        console.print(Panel(
+            "[dim]No traces recorded yet.[/dim]\n"
+            "Decorate your functions with [bold cyan]@record[/bold cyan] and run them.",
+            title="RetroTrace — Traces", border_style="dim",
+        ))
         return
 
-    # Fetch the root function name (first event) for each trace
-    root_fn: Dict[str, str] = {}
     with ExecutionLedger(db_path=db_path) as ledger:
+        root_fn = {}
         for t in traces:
-            events = ledger.get_trace(t["trace_id"])
-            root_fn[t["trace_id"]] = events[0].function_name if events else "—"
+            evs = ledger.get_trace(t["trace_id"])
+            root_fn[t["trace_id"]] = evs[0].function_name if evs else "—"
 
-    table = Table(
-        title="RetroTrace — Recorded Traces",
-        box=box.ROUNDED,
-        show_header=True,
-        header_style="bold cyan",
-        highlight=True,
-    )
-    table.add_column("", width=3, justify="center")           # status icon
+    table = Table(title="RetroTrace — Recorded Traces", box=box.ROUNDED,
+                  header_style="bold cyan", highlight=True)
+    table.add_column("", width=3, justify="center")
     table.add_column("Trace ID", style="dim", no_wrap=True)
     table.add_column("Root Function", style="bold")
     table.add_column("Started At", no_wrap=True)
@@ -123,201 +84,95 @@ def cmd_list(db_path: str) -> None:
             str(t["total_events"]),
             "Yes" if has_error else "",
         )
-
     console.print(table)
 
 
 # ---------------------------------------------------------------------------
-# Command: inspect
+# inspect
 # ---------------------------------------------------------------------------
 
-def _build_tree(events: List[ExecutionEvent]) -> Tree:
-    """
-    Recursively nest events by their parent_id relationships into a Rich Tree.
-    Root events (parent_id is None) become top-level branches.
-    """
-    by_id: Dict[str, ExecutionEvent] = {e.event_id: e for e in events}
-    children: Dict[Optional[str], List[ExecutionEvent]] = {}
-    for e in events:
-        children.setdefault(e.parent_id, []).append(e)
-
-    def _node_label(e: ExecutionEvent) -> Text:
-        label = Text()
-        label.append(f"{e.function_name}", style="bold yellow")
-        label.append(f"  [{e.duration_ms:.2f} ms]", style="dim")
-        label.append(f"\n  module: {e.module_path}", style="dim cyan")
-
-        # Inputs
-        inputs_str = _truncate(_fmt_inputs(e.inputs), 200)
-        label.append(f"\n  inputs: {inputs_str}", style="white")
-
-        if e.error:
-            snippet = _error_snippet(e.error)
-            label.append(f"\n  [bold red]ERROR:[/bold red] {snippet}", style="red")
-        else:
-            out = _truncate(_fmt_output(e.output), 120)
-            label.append(f"\n  return: {out}", style="green")
-
-        return label
-
-    def _add_children(tree_node, parent_id: Optional[str]) -> None:
-        for child in sorted(
-            children.get(parent_id, []), key=lambda e: e.started_at
-        ):
-            branch = tree_node.add(_node_label(child))
-            _add_children(branch, child.event_id)
-
-    # Build from roots
-    roots = children.get(None, [])
-    if not roots:
-        # Fallback: treat all as roots in chronological order
-        roots = sorted(events, key=lambda e: e.started_at)
-
-    root_roots = sorted(roots, key=lambda e: e.started_at)
-    if len(root_roots) == 1:
-        tree = Tree(_node_label(root_roots[0]), guide_style="dim")
-        _add_children(tree, root_roots[0].event_id)
-    else:
-        tree = Tree(
-            Text("Trace", style="bold magenta"), guide_style="dim"
-        )
-        for r in root_roots:
-            branch = tree.add(_node_label(r))
-            _add_children(branch, r.event_id)
-
-    return tree
-
-
-def cmd_inspect(trace_id: str, db_path: str) -> None:
-    """Render a nested tree of all events in a single trace."""
+def cmd_inspect(db_path: str, trace_id: str) -> None:
     with ExecutionLedger(db_path=db_path) as ledger:
         events = ledger.get_trace(trace_id)
 
     if not events:
-        console.print(
-            f"[bold red]No events found[/bold red] for trace_id [bold]{trace_id}[/bold]"
-        )
+        console.print(f"[bold red]No events found[/bold red] for trace [bold]{trace_id}[/bold]")
         sys.exit(1)
 
-    tree = _build_tree(events)
-    console.print(
-        Panel(
-            tree,
-            title=f"[bold cyan]Trace:[/bold cyan] {trace_id}",
-            border_style="cyan",
-            padding=(1, 2),
-        )
-    )
-
-
-# ---------------------------------------------------------------------------
-# Command: diff
-# ---------------------------------------------------------------------------
-
-def cmd_diff(trace_id_1: str, trace_id_2: str, db_path: str) -> None:
-    """Side-by-side diff of two execution traces."""
-    with ExecutionLedger(db_path=db_path) as ledger:
-        events_a = ledger.get_trace(trace_id_1)
-        events_b = ledger.get_trace(trace_id_2)
-
-    if not events_a:
-        console.print(f"[red]Trace not found:[/red] {trace_id_1}")
-        sys.exit(1)
-    if not events_b:
-        console.print(f"[red]Trace not found:[/red] {trace_id_2}")
-        sys.exit(1)
-
-    max_len = max(len(events_a), len(events_b))
-
-    table = Table(
-        title="RetroTrace — Trace Diff",
-        box=box.ROUNDED,
-        header_style="bold cyan",
-        show_header=True,
-        show_lines=True,
-    )
-    table.add_column("#", width=4, justify="right", style="dim")
-    table.add_column(f"Trace A  [{trace_id_1[:8]}…]", ratio=1)
-    table.add_column("Match", width=5, justify="center")
-    table.add_column(f"Trace B  [{trace_id_2[:8]}…]", ratio=1)
-
-    any_diff = False
-
-    for i in range(max_len):
-        ea = events_a[i] if i < len(events_a) else None
-        eb = events_b[i] if i < len(events_b) else None
-
-        # Determine match state
-        if ea is None or eb is None:
-            match_icon = Text("±", style="bold yellow")
-            row_style = "on dark_orange3"
-            any_diff = True
-        elif ea.function_name != eb.function_name:
-            match_icon = Text("✗", style="bold red")
-            row_style = "on dark_red"
-            any_diff = True
-        elif ea.inputs != eb.inputs:
-            match_icon = Text("~", style="bold yellow")
-            row_style = "on dark_orange3"
-            any_diff = True
-        elif ea.output != eb.output:
-            match_icon = Text("~", style="bold yellow")
-            row_style = "on dark_orange3"
-            any_diff = True
+    root_tree = Tree(f"[bold cyan]Trace: {trace_id}[/bold cyan]")
+    nodes = {}
+    for e in events:
+        label = f"[bold]{e.function_name}[/bold] ({e.duration_ms:.2f}ms)"
+        if e.error:
+            last_line = e.error.strip().splitlines()[-1]
+            label += f"\n  [red]Error: {last_line}[/red]"
         else:
-            match_icon = Text("✓", style="bold green")
-            row_style = ""
+            label += f"\n  [dim]Out: {_truncate(str(e.output), 80)}[/dim]"
 
-        def _cell(e: Optional[ExecutionEvent]) -> Text:
-            if e is None:
-                return Text("— (missing)", style="dim red")
-            t = Text()
-            t.append(e.function_name, style="bold yellow")
-            t.append(f"  [{e.duration_ms:.2f} ms]\n", style="dim")
-            t.append("in:  ", style="dim")
-            t.append(_truncate(json.dumps(e.inputs), 80), style="white")
-            t.append("\nout: ", style="dim")
-            if e.error:
-                t.append(_truncate(_error_snippet(e.error, 2), 80), style="red")
-            else:
-                t.append(_truncate(_fmt_output(e.output), 80), style="green")
-            return t
+        parent = nodes.get(e.parent_id) if e.parent_id else None
+        node = (parent or root_tree).add(label)
+        nodes[e.event_id] = node
 
-        table.add_row(
-            str(i + 1),
-            _cell(ea),
-            match_icon,
-            _cell(eb),
-            style=row_style,
-        )
+    console.print(Panel(root_tree, title="Execution Tree", expand=False))
+
+
+# ---------------------------------------------------------------------------
+# diff
+# ---------------------------------------------------------------------------
+
+def cmd_diff(db_path: str, t1: str, t2: str) -> None:
+    with ExecutionLedger(db_path=db_path) as ledger:
+        events1 = ledger.get_trace(t1)
+        events2 = ledger.get_trace(t2)
+
+    if not events1 or not events2:
+        console.print("[red]Error: One or both traces not found.[/red]")
+        sys.exit(1)
+
+    table = Table(title=f"Trace Diff: {t1[:8]}… vs {t2[:8]}…",
+                  box=box.ROUNDED, header_style="bold cyan", show_lines=True)
+    table.add_column("Step", justify="center", width=5)
+    table.add_column("Match", justify="center", width=5)
+    table.add_column(f"Trace A ({t1[:8]})", ratio=1)
+    table.add_column(f"Trace B ({t2[:8]})", ratio=1)
+    table.add_column("Detail", style="yellow", ratio=1)
+
+    max_len = max(len(events1), len(events2))
+    for i in range(max_len):
+        e1 = events1[i] if i < len(events1) else None
+        e2 = events2[i] if i < len(events2) else None
+        fn1 = e1.function_name if e1 else "—"
+        fn2 = e2.function_name if e2 else "—"
+
+        if not e1 or not e2:
+            icon, detail = "[red]±[/red]", "Missing step"
+        elif e1.function_name != e2.function_name:
+            icon, detail = "[red]✗[/red]", "Function mismatch"
+        elif e1.inputs != e2.inputs:
+            icon, detail = "[yellow]~[/yellow]", "Input drift"
+        elif e1.output != e2.output or e1.error != e2.error:
+            icon, detail = "[yellow]~[/yellow]", "Output/error drift"
+        else:
+            icon, detail = "[green]✓[/green]", "Identical"
+
+        table.add_row(str(i + 1), icon, fn1, fn2, detail)
 
     console.print(table)
 
-    if any_diff:
-        console.print("\n[bold yellow]⚠  Differences detected between the two traces.[/bold yellow]")
-    else:
-        console.print("\n[bold green]✓  Traces are identical.[/bold green]")
-
 
 # ---------------------------------------------------------------------------
-# Command: studio
+# studio
 # ---------------------------------------------------------------------------
 
-def cmd_studio(db_path: str, port: int, host: str = "127.0.0.1",
-               no_browser: bool = False) -> None:
-    """Launch the RetroTrace Developer Studio (FastAPI + uvicorn)."""
-    import webbrowser
+def cmd_studio(db_path: str, host: str, port: int, no_browser: bool) -> None:
     import threading
 
     try:
         import uvicorn
         from retrotrace.server.app import create_app
-        from retrotrace.storage.ledger import ExecutionLedger as _Ledger
     except ImportError as exc:
-        console.print(
-            f"[red]Missing dependency:[/red] {exc}\n"
-            "Run [bold]pip install -e .[/bold] to add FastAPI/uvicorn."
-        )
+        console.print(f"[red]Missing dependency:[/red] {exc}\n"
+                      "Run [bold]pip install -e .[/bold] to add FastAPI/uvicorn.")
         sys.exit(1)
 
     url = f"http://{host}:{port}"
@@ -325,17 +180,17 @@ def cmd_studio(db_path: str, port: int, host: str = "127.0.0.1",
         f"\n[bold cyan]RetroTrace Developer Studio[/bold cyan]\n"
         f"  Studio   : [link={url}]{url}[/link]\n"
         f"  API docs : [link={url}/api/docs]{url}/api/docs[/link]\n"
-        f"  DB       : [dim]{db_path}[/dim]\n"
-        f"\nPress [bold]Ctrl-C[/bold] to stop.\n"
+        f"  DB       : [dim]{db_path}[/dim]\n\n"
+        f"Press [bold]Ctrl-C[/bold] to stop.\n"
     )
 
-    ledger = _Ledger(db_path=db_path)
-    app = create_app(ledger)
+    app = create_app(db_path=db_path)
 
     if not no_browser:
-        def _open() -> None:
-            import time as _time
-            _time.sleep(1.0)
+        def _open():
+            import time
+            time.sleep(1.0)
+            import webbrowser
             webbrowser.open(url)
         threading.Thread(target=_open, daemon=True).start()
 
@@ -343,7 +198,7 @@ def cmd_studio(db_path: str, port: int, host: str = "127.0.0.1",
 
 
 # ---------------------------------------------------------------------------
-# Argument parser & entry point
+# Argument parser (exported for tests)
 # ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -352,40 +207,36 @@ def _build_parser() -> argparse.ArgumentParser:
         description="RetroTrace — execution tracing & deterministic replay",
     )
     parser.add_argument(
-        "--db",
-        metavar="PATH",
-        default=_DEFAULT_DB,
+        "--db", metavar="PATH", default=_DEFAULT_DB,
         help=f"Path to the SQLite ledger (default: {_DEFAULT_DB})",
     )
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
     sub.required = True
 
-    # ── list ──────────────────────────────────────────────────────────────
+    # list
     sub.add_parser("list", help="List all recorded traces")
 
-    # ── inspect ───────────────────────────────────────────────────────────
+    # inspect
     p_inspect = sub.add_parser("inspect", help="Inspect a single trace as a tree")
     p_inspect.add_argument("trace_id", help="UUID of the trace to inspect")
 
-    # ── diff ──────────────────────────────────────────────────────────────
+    # diff
     p_diff = sub.add_parser("diff", help="Side-by-side diff of two traces")
     p_diff.add_argument("trace_id_1", help="First trace UUID")
     p_diff.add_argument("trace_id_2", help="Second trace UUID")
 
-    # ── studio ────────────────────────────────────────────────────────────
+    # studio
     p_studio = sub.add_parser(
         "studio",
-        help="Launch the RetroTrace Developer Studio web UI (FastAPI + uvicorn)",
+        help="Launch the RetroTrace Developer Studio web UI",
     )
-    p_studio.add_argument(
-        "--port", type=int, default=8000, metavar="PORT",
-        help="Port to bind the server on (default: 8000)",
-    )
-    p_studio.add_argument(
-        "--host", default="127.0.0.1", metavar="HOST",
-        help="Host/interface to bind (default: 127.0.0.1)",
-    )
+    p_studio.add_argument("--host", default="127.0.0.1", metavar="HOST",
+                          help="Host interface (default: 127.0.0.1)")
+    p_studio.add_argument("--port", type=int, default=8000, metavar="PORT",
+                          help="Port (default: 8000)")
+    p_studio.add_argument("--no-browser", action="store_true",
+                          help="Do not open browser automatically")
 
     return parser
 
@@ -393,19 +244,17 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: Optional[List[str]] = None) -> None:
     parser = _build_parser()
     args = parser.parse_args(argv)
-
-    # Sub-command --db overrides global --db
-    db = getattr(args, "db", None) or _DEFAULT_DB
+    db = args.db or _DEFAULT_DB
 
     try:
         if args.command == "list":
             cmd_list(db)
         elif args.command == "inspect":
-            cmd_inspect(args.trace_id, db)
+            cmd_inspect(db, args.trace_id)
         elif args.command == "diff":
-            cmd_diff(args.trace_id_1, args.trace_id_2, db)
+            cmd_diff(db, args.trace_id_1, args.trace_id_2)
         elif args.command == "studio":
-            cmd_studio(db, port=args.port, host=args.host)
+            cmd_studio(db, args.host, args.port, args.no_browser)
     except KeyboardInterrupt:
         console.print("\n[dim]Interrupted.[/dim]")
         sys.exit(130)

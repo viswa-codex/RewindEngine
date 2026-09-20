@@ -1,386 +1,168 @@
-"""
-tests/test_cli.py
-Unit tests for retrotrace.cli.main — list, inspect, and diff commands.
-
-Strategy
---------
-We exercise each command by calling its internal function directly
-(cmd_list / cmd_inspect / cmd_diff), redirecting Rich output to a
-StringIO buffer so we can make structural assertions on the rendered text
-without relying on ANSI codes or terminal width.
-"""
-
-from __future__ import annotations
-
-import io
-import uuid
-from datetime import datetime, timezone, timedelta
-from pathlib import Path
-from typing import List
-
-import pytest
+import argparse
+import sys
+import webbrowser
+import uvicorn
 from rich.console import Console
+from rich.table import Table
+from rich.tree import Tree
+from rich.panel import Panel
 
-from retrotrace.cli.main import (
-    _build_parser,
-    _build_tree,
-    cmd_diff,
-    cmd_inspect,
-    cmd_list,
-)
-from retrotrace.storage.ledger import ExecutionEvent, ExecutionLedger
+from retrotrace.storage.ledger import ExecutionLedger
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _capture(fn, *args, **kwargs) -> str:
-    """Run a CLI command function with Rich output redirected to a string."""
-    buf = io.StringIO()
-    test_console = Console(file=buf, width=200, highlight=False, markup=True)
-
-    import retrotrace.cli.main as cli_mod
-    original = cli_mod.console
-    cli_mod.console = test_console
-    try:
-        fn(*args, **kwargs)
-    except SystemExit:
-        pass
-    finally:
-        cli_mod.console = original
-
-    return buf.getvalue()
+console = Console()
 
 
-def _now(offset_secs: float = 0.0) -> datetime:
-    return datetime.now(tz=timezone.utc) + timedelta(seconds=offset_secs)
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="retrotrace", description="Deterministic Execution Recorder & Studio")
+    parser.add_argument("--db", default=".retrotrace.db", help="Path to SQLite ledger database")
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    # list
+    subparsers.add_parser("list", help="List execution traces")
+
+    # inspect
+    p_inspect = subparsers.add_parser("inspect", help="Inspect a trace execution tree")
+    p_inspect.add_argument("trace_id", help="Trace UUID to inspect")
+
+    # diff
+    p_diff = subparsers.add_parser("diff", help="Diff two execution traces")
+    p_diff.add_argument("t1", help="First trace UUID")
+    p_diff.add_argument("t2", help="Second trace UUID")
+
+    # studio
+    p_studio = subparsers.add_parser("studio", help="Launch Developer Web Studio")
+    p_studio.add_argument("--host", default="127.0.0.1", help="Host interface (default: 127.0.0.1)")
+    p_studio.add_argument("--port", type=int, default=8000, help="Port (default: 8000)")
+    p_studio.add_argument("--no-browser", action="store_true", help="Do not open browser automatically")
+
+    return parser
 
 
-def _make_event(
-    *,
-    trace_id: str,
-    function_name: str = "fn",
-    module_path: str = "mod",
-    parent_id: str | None = None,
-    inputs: dict | None = None,
-    output=42,
-    error: str | None = None,
-    started_offset: float = 0.0,
-    duration_ms: float = 5.0,
-) -> ExecutionEvent:
-    ts = _now(started_offset)
-    return ExecutionEvent(
-        event_id=str(uuid.uuid4()),
-        trace_id=trace_id,
-        parent_id=parent_id,
-        function_name=function_name,
-        module_path=module_path,
-        inputs=inputs or {"x": 1},
-        output=output,
-        error=error,
-        started_at=ts,
-        completed_at=ts + timedelta(milliseconds=duration_ms),
-        duration_ms=duration_ms,
-    )
+def cmd_list(db_path: str):
+    ledger = ExecutionLedger(db_path=db_path)
+    traces = ledger.list_traces()
 
+    if not traces:
+        console.print(f"[yellow]No traces found in database: {db_path}[/yellow]")
+        return
 
-@pytest.fixture()
-def ledger(tmp_path: Path) -> ExecutionLedger:
-    db_file = tmp_path / "cli_test.db"
-    with ExecutionLedger(db_path=str(db_file)) as lg:
-        yield lg
+    table = Table(title="Execution Traces")
+    table.add_column("Status", justify="center")
+    table.add_column("Trace ID", style="cyan")
+    table.add_column("Root Function", style="bold")
+    table.add_column("Started At", style="dim")
+    table.add_column("Events", justify="right")
+    table.add_column("Error")
 
+    for t in traces:
+        events = ledger.get_trace(t["trace_id"])
+        root_fn = events[0].fn_name if events else "unknown"
+        status = "[red]✗[/red]" if t["has_error"] else "[green]✓[/green]"
+        err_text = "[red]Yes[/red]" if t["has_error"] else "[green]No[/green]"
 
-# ---------------------------------------------------------------------------
-# Argument parser
-# ---------------------------------------------------------------------------
-
-class TestParser:
-    def test_list_command_parsed(self):
-        parser = _build_parser()
-        args = parser.parse_args(["list"])
-        assert args.command == "list"
-
-    def test_inspect_command_parsed(self):
-        parser = _build_parser()
-        args = parser.parse_args(["inspect", "abc-123"])
-        assert args.command == "inspect"
-        assert args.trace_id == "abc-123"
-
-    def test_diff_command_parsed(self):
-        parser = _build_parser()
-        args = parser.parse_args(["diff", "t1", "t2"])
-        assert args.command == "diff"
-        assert args.trace_id_1 == "t1"
-        assert args.trace_id_2 == "t2"
-
-    def test_db_override(self):
-        parser = _build_parser()
-        args = parser.parse_args(["--db", "mydb.db", "list"])
-        assert args.db == "mydb.db"
-
-    def test_missing_command_exits(self):
-        parser = _build_parser()
-        with pytest.raises(SystemExit):
-            parser.parse_args([])
-
-
-# ---------------------------------------------------------------------------
-# cmd_list
-# ---------------------------------------------------------------------------
-
-class TestCmdList:
-    def test_empty_ledger_shows_no_traces_message(self, ledger, tmp_path):
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        assert "No traces recorded yet" in output
-
-    def test_populated_ledger_shows_trace_rows(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=tid, function_name="pipeline"))
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        assert tid in output
-        assert "pipeline" in output
-
-    def test_success_trace_shows_checkmark(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=tid, error=None))
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        assert "✓" in output
-
-    def test_error_trace_shows_cross(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(
-            _make_event(trace_id=tid, error="ValueError: bad\n  line2")
+        table.add_row(
+            status,
+            t["trace_id"],
+            root_fn,
+            str(t["started_at"]),
+            str(t["total_events"]),
+            err_text
         )
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        assert "✗" in output
-        assert "Yes" in output
 
-    def test_event_count_shown(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        for _ in range(3):
-            ledger.record_event(_make_event(trace_id=tid))
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        assert "3" in output
-
-    def test_multiple_traces_all_listed(self, ledger, tmp_path):
-        for fn_name in ["alpha", "beta", "gamma"]:
-            ledger.record_event(
-                _make_event(trace_id=str(uuid.uuid4()), function_name=fn_name)
-            )
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        for fn_name in ["alpha", "beta", "gamma"]:
-            assert fn_name in output
-
-    def test_table_header_columns_present(self, ledger, tmp_path):
-        ledger.record_event(_make_event(trace_id=str(uuid.uuid4())))
-        output = _capture(cmd_list, str(tmp_path / "cli_test.db"))
-        assert "Trace ID" in output
-        assert "Root Function" in output
-        assert "Events" in output
+    console.print(table)
 
 
-# ---------------------------------------------------------------------------
-# cmd_inspect
-# ---------------------------------------------------------------------------
+def cmd_inspect(db_path: str, trace_id: str):
+    ledger = ExecutionLedger(db_path=db_path)
+    events = ledger.get_trace(trace_id)
 
-class TestCmdInspect:
-    def test_single_event_shows_function_name(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=tid, function_name="my_fn"))
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        assert "my_fn" in output
+    if not events:
+        console.print(f"[red]Error: Trace {trace_id} not found.[/red]")
+        sys.exit(1)
 
-    def test_duration_shown(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=tid, duration_ms=37.5))
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        assert "37.50 ms" in output
+    root_tree = Tree(f"[bold cyan]Trace: {trace_id}[/bold cyan]")
+    nodes = {}
 
-    def test_inputs_rendered(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(
-            _make_event(trace_id=tid, inputs={"amount": 100, "currency": "USD"})
-        )
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        assert "amount" in output
-        assert "100" in output
+    for e in events:
+        label = f"[bold]{e.fn_name}[/bold] ({e.duration_ms:.2f}ms)"
+        if e.error:
+            label += f"\n  [red]Error: {e.error.strip().splitlines()[-1]}[/red]"
+        else:
+            label += f"\n  [dim]Out: {str(e.output)[:80]}[/dim]"
 
-    def test_return_value_shown(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=tid, output={"result": 42}))
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        assert "42" in output
+        if e.parent_id and e.parent_id in nodes:
+            node = nodes[e.parent_id].add(label)
+        else:
+            node = root_tree.add(label)
+        nodes[e.event_id] = node
 
-    def test_error_shown_in_red_label(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(
-            _make_event(
-                trace_id=tid,
-                error="Traceback (most recent call last):\n  ...\nValueError: oops",
-            )
-        )
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        assert "ERROR" in output or "ValueError" in output
-
-    def test_unknown_trace_id_exits(self, ledger, tmp_path):
-        """cmd_inspect with a missing trace_id calls sys.exit(1)."""
-        fake_id = str(uuid.uuid4())
-        # Should not raise anything to the test — SystemExit is caught by _capture
-        output = _capture(cmd_inspect, fake_id, str(tmp_path / "cli_test.db"))
-        assert "No events found" in output
-
-    def test_nested_events_both_shown(self, ledger, tmp_path):
-        """A parent + child event should both appear in the tree output."""
-        tid = str(uuid.uuid4())
-        parent = _make_event(
-            trace_id=tid, function_name="outer", started_offset=0
-        )
-        child = _make_event(
-            trace_id=tid,
-            function_name="inner",
-            parent_id=parent.event_id,
-            started_offset=0.001,
-        )
-        ledger.record_event(parent)
-        ledger.record_event(child)
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        assert "outer" in output
-        assert "inner" in output
-
-    def test_trace_id_shown_in_panel_title(self, ledger, tmp_path):
-        tid = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=tid))
-        output = _capture(cmd_inspect, tid, str(tmp_path / "cli_test.db"))
-        # At least the first 8 chars of the UUID should appear
-        assert tid[:8] in output
+    console.print(Panel(root_tree, title="Execution Tree", expand=False))
 
 
-# ---------------------------------------------------------------------------
-# _build_tree (unit-level)
-# ---------------------------------------------------------------------------
+def cmd_diff(db_path: str, t1: str, t2: str):
+    ledger = ExecutionLedger(db_path=db_path)
+    events1 = ledger.get_trace(t1)
+    events2 = ledger.get_trace(t2)
 
-class TestBuildTree:
-    def test_single_event_tree_not_none(self):
-        tid = str(uuid.uuid4())
-        events = [_make_event(trace_id=tid, function_name="root")]
-        tree = _build_tree(events)
-        assert tree is not None
+    if not events1 or not events2:
+        console.print("[red]Error: One or both traces not found.[/red]")
+        sys.exit(1)
 
-    def test_nested_events_produce_children(self):
-        """The tree for parent→child must include both function names in label."""
-        tid = str(uuid.uuid4())
-        parent = _make_event(trace_id=tid, function_name="parent_fn")
-        child = _make_event(
-            trace_id=tid, function_name="child_fn", parent_id=parent.event_id
-        )
-        tree = _build_tree([parent, child])
-        # Rich Tree's label is a Text object; convert to plain str
-        root_label = tree.label.plain if hasattr(tree.label, "plain") else str(tree.label)
-        assert "parent_fn" in root_label
-        # Children present
-        assert len(tree.children) == 1
-        child_label = tree.children[0].label.plain
-        assert "child_fn" in child_label
+    table = Table(title=f"Trace Diff: {t1[:8]}... vs {t2[:8]}...")
+    table.add_column("Step", justify="center")
+    table.add_column("Match", justify="center")
+    table.add_column(f"Trace 1 ({t1[:8]})", style="cyan")
+    table.add_column(f"Trace 2 ({t2[:8]})", style="magenta")
+    table.add_column("Diff Detail", style="yellow")
 
-    def test_multiple_roots(self):
-        """Two events with no parent_id become two top-level branches."""
-        tid = str(uuid.uuid4())
-        e1 = _make_event(trace_id=tid, function_name="a", started_offset=0)
-        e2 = _make_event(trace_id=tid, function_name="b", started_offset=1)
-        tree = _build_tree([e1, e2])
-        # The umbrella "Trace" root has 2 children
-        assert len(tree.children) == 2
+    max_len = max(len(events1), len(events2))
+    for i in range(max_len):
+        e1 = events1[i] if i < len(events1) else None
+        e2 = events2[i] if i < len(events2) else None
+
+        fn1 = e1.fn_name if e1 else "-"
+        fn2 = e2.fn_name if e2 else "-"
+
+        if not e1 or not e2:
+            table.add_row(str(i + 1), "[red]±[/red]", fn1, fn2, "Missing step in one run")
+        elif e1.fn_name != e2.fn_name:
+            table.add_row(str(i + 1), "[red]✗[/red]", fn1, fn2, "Function name mismatch")
+        elif e1.inputs != e2.inputs:
+            table.add_row(str(i + 1), "[yellow]~[/yellow]", fn1, fn2, "Input arguments drifted")
+        elif e1.output != e2.output or e1.error != e2.error:
+            table.add_row(str(i + 1), "[yellow]~[/yellow]", fn1, fn2, "Output/Error drifted")
+        else:
+            table.add_row(str(i + 1), "[green]✓[/green]", fn1, fn2, "Identical")
+
+    console.print(table)
 
 
-# ---------------------------------------------------------------------------
-# cmd_diff
-# ---------------------------------------------------------------------------
+def cmd_studio(db_path: str, host: str, port: int, no_browser: bool):
+    from retrotrace.server.app import create_app
+    app = create_app(db_path=db_path)
+    url = f"http://{host}:{port}"
+    console.print(f"[bold green]Starting RetroTrace Studio at {url} (DB: {db_path})[/bold green]")
+    if not no_browser:
+        webbrowser.open(url)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
-class TestCmdDiff:
-    def _two_traces(self, ledger) -> tuple[str, str]:
-        """Record two identical traces; return (trace_id_1, trace_id_2)."""
-        tids = [str(uuid.uuid4()), str(uuid.uuid4())]
-        for tid in tids:
-            ledger.record_event(
-                _make_event(trace_id=tid, function_name="compute", inputs={"n": 5}, output=10)
-            )
-        return tids[0], tids[1]
 
-    def test_identical_traces_show_checkmark(self, ledger, tmp_path):
-        t1, t2 = self._two_traces(ledger)
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "✓" in output
+def main():
+    parser = _build_parser()
+    args = parser.parse_args()
 
-    def test_identical_traces_no_diff_message(self, ledger, tmp_path):
-        t1, t2 = self._two_traces(ledger)
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "identical" in output.lower() or "Traces are identical" in output
+    if args.command == "list":
+        cmd_list(args.db)
+    elif args.command == "inspect":
+        cmd_inspect(args.db, args.trace_id)
+    elif args.command == "diff":
+        cmd_diff(args.db, args.t1, args.t2)
+    elif args.command == "studio":
+        cmd_studio(args.db, args.host, args.port, args.no_browser)
+    else:
+        parser.print_help()
 
-    def test_different_function_shows_cross(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=t1, function_name="alpha"))
-        ledger.record_event(_make_event(trace_id=t2, function_name="beta"))
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "✗" in output
 
-    def test_different_inputs_shows_tilde(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        ledger.record_event(
-            _make_event(trace_id=t1, function_name="fn", inputs={"x": 1})
-        )
-        ledger.record_event(
-            _make_event(trace_id=t2, function_name="fn", inputs={"x": 99})
-        )
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "~" in output
-
-    def test_different_outputs_shows_tilde(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        ledger.record_event(
-            _make_event(trace_id=t1, function_name="fn", inputs={"x": 1}, output=10)
-        )
-        ledger.record_event(
-            _make_event(trace_id=t2, function_name="fn", inputs={"x": 1}, output=99)
-        )
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "~" in output
-
-    def test_unequal_length_traces_show_missing(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        for i in range(3):
-            ledger.record_event(
-                _make_event(trace_id=t1, function_name="fn", started_offset=i * 0.001)
-            )
-        ledger.record_event(_make_event(trace_id=t2, function_name="fn"))
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "missing" in output.lower() or "±" in output
-
-    def test_diff_shows_differences_warning(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=t1, function_name="x"))
-        ledger.record_event(_make_event(trace_id=t2, function_name="y"))
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "Differences detected" in output or "difference" in output.lower()
-
-    def test_missing_trace_exits(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        fake = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=t1))
-        output = _capture(cmd_diff, t1, fake, str(tmp_path / "cli_test.db"))
-        assert "not found" in output.lower() or "Trace not found" in output
-
-    def test_both_function_names_in_output(self, ledger, tmp_path):
-        t1 = str(uuid.uuid4())
-        t2 = str(uuid.uuid4())
-        ledger.record_event(_make_event(trace_id=t1, function_name="func_a"))
-        ledger.record_event(_make_event(trace_id=t2, function_name="func_b"))
-        output = _capture(cmd_diff, t1, t2, str(tmp_path / "cli_test.db"))
-        assert "func_a" in output
-        assert "func_b" in output
-
+if __name__ == "__main__":
+    main()

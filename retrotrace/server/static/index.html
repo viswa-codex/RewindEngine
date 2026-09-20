@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>RetroTrace Studio</title>
+<style>
+/* ── Reset ─────────────────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  /* VS Code exact palette */
+  --vsc-bg:           #1e1e1e;
+  --vsc-sidebar:      #252526;
+  --vsc-actbar:       #333333;
+  --vsc-panel:        #1e1e1e;
+  --vsc-editor:       #1e1e1e;
+  --vsc-tab-active:   #1e1e1e;
+  --vsc-tab-inactive: #2d2d2d;
+  --vsc-tab-border:   #007acc;
+  --vsc-border:       #3c3c3c;
+  --vsc-accent:       #007acc;
+  --vsc-accent-hover: #1a85c8;
+  --vsc-green:        #4ec994;
+  --vsc-red:          #f44747;
+  --vsc-yellow:       #dcdcaa;
+  --vsc-orange:       #ce9178;
+  --vsc-blue:         #9cdcfe;
+  --vsc-purple:       #c586c0;
+  --vsc-comment:      #6a9955;
+  --vsc-text:         #d4d4d4;
+  --vsc-muted:        #858585;
+  --vsc-selection:    #264f78;
+  --vsc-line-num:     #858585;
+  --vsc-status:       #007acc;
+  --vsc-status-text:  #ffffff;
+  --vsc-input-bg:     #3c3c3c;
+  --vsc-scrollbar:    #424242;
+  --font-ui:   -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-code: "Fira Code", "Cascadia Code", "JetBrains Mono",
+               "Consolas", "Courier New", monospace;
+  --act-w:  48px;
+  --side-w: 280px;
+  --tree-w: 280px;
+  --tab-h:  35px;
+  --dbg-h:  40px;
+  --stat-h: 22px;
+}
+html,body{height:100%;background:var(--vsc-bg);color:var(--vsc-text);
+          font-family:var(--font-ui);font-size:13px;overflow:hidden}
+
+/* ── Top-level shell ───────────────────────────────────────────────── */
+/* rows: tabs(35) + debugbar(40) + content(1fr) + statusbar(22) */
+#app{
+  display:grid;height:100vh;
+  grid-template-rows:var(--tab-h) var(--dbg-h) 1fr var(--stat-h);
+  grid-template-columns:var(--act-w) var(--side-w) 1fr;
+  grid-template-areas:
+    "act  tabs   tabs"
+    "act  dbgbar dbgbar"
+    "act  main   main"
+    "stat stat   stat";
+}
+
+/* ── Activity bar ──────────────────────────────────────────────────── */
+#actbar{
+  grid-area:act;background:var(--vsc-actbar);
+  display:flex;flex-direction:column;align-items:center;
+  padding-top:8px;gap:2px;border-right:1px solid var(--vsc-border);
+}
+.act-icon{
+  width:48px;height:48px;display:flex;align-items:center;
+  justify-content:center;cursor:pointer;color:var(--vsc-muted);
+  font-size:22px;transition:color .15s;position:relative;
+}
+.act-icon:hover,.act-icon.active{color:var(--vsc-text);}
+.act-icon.active::before{
+  content:"";position:absolute;left:0;top:8px;bottom:8px;
+  width:2px;background:var(--vsc-accent);border-radius:0 2px 2px 0;
+}
+/* SVG icons */
+.ico-explorer::after{content:"⎇"}
+.ico-debug::after{content:"▷"}
+.ico-diff::after{content:"⇄"}
+.ico-settings::after{content:"⚙"}
+
+/* ── Tab bar ────────────────────────────────────────────────────────── */
+#tabbar{
+  grid-area:tabs;background:var(--vsc-tab-inactive);
+  display:flex;align-items:stretch;
+  border-bottom:1px solid var(--vsc-border);overflow-x:auto;
+}
+.tab{
+  display:flex;align-items:center;gap:8px;padding:0 14px;
+  min-width:140px;cursor:pointer;white-space:nowrap;
+  color:var(--vsc-muted);font-size:12px;border-right:1px solid var(--vsc-border);
+  background:var(--vsc-tab-inactive);transition:background .1s;
+}
+.tab.active{
+  background:var(--vsc-tab-active);color:var(--vsc-text);
+  border-top:1px solid var(--vsc-tab-border);border-bottom:none;
+}
+.tab .tab-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.tab .tab-fn{font-family:var(--font-code);font-size:11px;color:var(--vsc-blue)}
+.tab .tab-close{margin-left:auto;color:var(--vsc-muted);font-size:11px;
+                 width:18px;text-align:center;}
+.tab .tab-close:hover{color:var(--vsc-text);}
+#tab-breadcrumb{
+  display:flex;align-items:center;padding:0 12px;
+  color:var(--vsc-muted);font-size:11px;gap:4px;margin-left:auto;
+}
+#tab-breadcrumb span{color:var(--vsc-text);}
+
+/* ── Debug / scrub bar ─────────────────────────────────────────────── */
+#dbgbar{
+  grid-area:dbgbar;background:#2d2d2d;
+  border-bottom:1px solid var(--vsc-border);
+  display:flex;align-items:center;padding:0 12px;gap:8px;
+}
+.dbg-btn{
+  width:28px;height:28px;border-radius:4px;border:none;
+  background:transparent;color:var(--vsc-text);cursor:pointer;
+  font-size:14px;display:flex;align-items:center;justify-content:center;
+  transition:background .1s;
+}
+.dbg-btn:hover{background:var(--vsc-input-bg);}
+.dbg-btn:disabled{color:var(--vsc-muted);cursor:default;}
+.dbg-sep{width:1px;height:20px;background:var(--vsc-border);margin:0 4px;}
+#scr-range{
+  flex:1;accent-color:var(--vsc-accent);
+  height:3px;cursor:pointer;
+}
+#scr-counter{
+  font-family:var(--font-code);font-size:11px;color:var(--vsc-muted);
+  min-width:80px;text-align:right;white-space:nowrap;
+}
+#scr-fn{
+  font-family:var(--font-code);font-size:11px;color:var(--vsc-yellow);
+  max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
+/* ── Main area ─────────────────────────────────────────────────────── */
+#main{
+  grid-area:main;display:flex;overflow:hidden;
+}
+
+/* ── Sidebar (traces list) ─────────────────────────────────────────── */
+#sidebar{
+  width:var(--side-w);background:var(--vsc-sidebar);
+  border-right:1px solid var(--vsc-border);
+  display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;
+}
+.section-header{
+  padding:8px 12px;font-size:11px;font-weight:700;letter-spacing:.8px;
+  text-transform:uppercase;color:var(--vsc-muted);
+  display:flex;align-items:center;justify-content:space-between;
+  border-bottom:1px solid var(--vsc-border);flex-shrink:0;
+}
+.section-header .sh-count{
+  color:var(--vsc-accent);font-weight:400;font-size:10px;
+}
+#search-wrap{padding:6px 8px;border-bottom:1px solid var(--vsc-border);flex-shrink:0}
+#search-input{
+  width:100%;background:var(--vsc-input-bg);border:1px solid var(--vsc-border);
+  color:var(--vsc-text);border-radius:3px;padding:4px 8px;font-size:12px;
+  outline:none;
+}
+#search-input:focus{border-color:var(--vsc-accent);}
+#trace-list{overflow-y:auto;flex:1;}
+.trace-row{
+  padding:8px 12px;cursor:pointer;border-bottom:1px solid #2a2a2a;
+  display:flex;align-items:flex-start;gap:8px;
+  transition:background .1s;
+}
+.trace-row:hover{background:#2a2a2a;}
+.trace-row.active{background:var(--vsc-selection);}
+.tr-badge{
+  width:14px;height:14px;border-radius:2px;flex-shrink:0;margin-top:1px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:9px;font-weight:700;
+}
+.tr-badge.ok{background:#1a3a28;color:var(--vsc-green);}
+.tr-badge.err{background:#3a1a1a;color:var(--vsc-red);}
+.tr-body{flex:1;min-width:0;}
+.tr-fn{font-family:var(--font-code);font-size:12px;font-weight:600;
+        color:var(--vsc-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.tr-meta{font-size:10px;color:var(--vsc-muted);margin-top:2px;}
+.tr-tag{background:#1c3a54;color:var(--vsc-accent);border-radius:2px;
+         padding:1px 4px;font-size:9px;margin-left:4px;}
+
+/* ── Editor area ───────────────────────────────────────────────────── */
+#editor-area{
+  flex:1;display:flex;overflow:hidden;
+}
+
+/* ── Call tree pane ────────────────────────────────────────────────── */
+#tree-pane{
+  width:var(--tree-w);background:var(--vsc-sidebar);
+  border-right:1px solid var(--vsc-border);
+  display:flex;flex-direction:column;overflow:hidden;flex-shrink:0;
+}
+#tree-scroll{overflow:auto;flex:1;padding:4px 0;}
+.tn{
+  display:flex;align-items:center;gap:4px;
+  padding:2px 0;cursor:pointer;user-select:none;
+}
+.tn:hover .tn-inner{background:#2a2a2a;}
+.tn.selected .tn-inner{background:var(--vsc-selection);}
+.tn-inner{
+  display:flex;align-items:center;gap:5px;
+  border-radius:3px;padding:2px 6px;flex:1;
+}
+.tn-chevron{width:12px;font-size:9px;color:var(--vsc-muted);flex-shrink:0;text-align:center;}
+.tn-icon{width:14px;height:14px;border-radius:2px;flex-shrink:0;
+          display:flex;align-items:center;justify-content:center;font-size:9px;}
+.tn-icon.ok{background:#1a3a28;color:var(--vsc-green);}
+.tn-icon.err{background:#3a1a1a;color:var(--vsc-red);}
+.tn-label{font-family:var(--font-code);font-size:12px;overflow:hidden;
+           text-overflow:ellipsis;white-space:nowrap;flex:1;}
+.tn-dur{font-size:10px;color:var(--vsc-muted);flex-shrink:0;}
+.tn-children{/* indent set inline */}
+
+/* ── Inspector pane ────────────────────────────────────────────────── */
+#inspector{
+  flex:1;display:flex;flex-direction:column;overflow:hidden;
+}
+.insp-half{flex:1;display:flex;flex-direction:column;overflow:hidden;}
+.insp-half + .insp-half{border-top:1px solid var(--vsc-border);}
+.editor-title{
+  padding:6px 14px;font-size:11px;font-weight:600;
+  color:var(--vsc-muted);text-transform:uppercase;letter-spacing:.7px;
+  background:#252526;border-bottom:1px solid var(--vsc-border);
+  display:flex;align-items:center;gap:8px;flex-shrink:0;
+}
+.editor-title .et-fn{font-family:var(--font-code);color:var(--vsc-yellow);
+                      font-weight:700;text-transform:none;letter-spacing:0;}
+.editor-title .et-dur{color:var(--vsc-comment);font-size:10px;margin-left:auto;}
+.code-editor{
+  flex:1;overflow:auto;display:flex;
+  background:var(--vsc-editor);font-family:var(--font-code);font-size:12.5px;
+}
+.line-nums{
+  padding:10px 0;min-width:40px;text-align:right;
+  color:var(--vsc-line-num);font-size:11px;background:#1e1e1e;
+  border-right:1px solid #2d2d2d;flex-shrink:0;user-select:none;
+}
+.line-num{padding:0 8px;display:block;line-height:20px;}
+.code-body{padding:10px 14px;flex:1;overflow:auto;}
+.code-body pre{line-height:20px;white-space:pre-wrap;word-break:break-word;}
+/* JSON syntax highlight classes */
+.j-key{color:#9cdcfe;}
+.j-str{color:#ce9178;}
+.j-num{color:#b5cea8;}
+.j-bool{color:#569cd6;}
+.j-null{color:#569cd6;}
+.error-block{color:#f44747;background:#1c0909;
+              border-left:2px solid #f44747;padding:10px 14px;
+              font-family:var(--font-code);font-size:12px;line-height:18px;
+              white-space:pre-wrap;word-break:break-word;}
+.empty-editor{color:var(--vsc-muted);padding:20px 14px;font-size:12px;}
+
+/* ── Diff panel ────────────────────────────────────────────────────── */
+#diff-panel{
+  display:none;flex:1;flex-direction:column;overflow:hidden;
+}
+#diff-panel.open{display:flex;}
+#diff-hdr{
+  padding:6px 14px;background:#252526;border-bottom:1px solid var(--vsc-border);
+  display:flex;align-items:center;gap:12px;flex-shrink:0;font-size:11px;
+}
+.dh-tid{font-family:var(--font-code);color:var(--vsc-accent);}
+#diff-summary{margin-left:auto;color:var(--vsc-comment);}
+#diff-close-btn{
+  background:none;border:none;color:var(--vsc-muted);cursor:pointer;
+  font-size:14px;padding:2px 6px;
+}
+#diff-close-btn:hover{color:var(--vsc-red);}
+#diff-scroll{overflow:auto;flex:1;}
+table.dt{width:100%;border-collapse:collapse;font-size:11.5px;}
+.dt th{
+  background:#252526;border:1px solid var(--vsc-border);
+  padding:5px 10px;color:var(--vsc-muted);text-align:left;
+  font-size:10px;text-transform:uppercase;letter-spacing:.6px;
+  position:sticky;top:0;z-index:1;
+}
+.dt td{
+  border:1px solid #2a2a2a;padding:6px 10px;vertical-align:top;
+}
+.dt tr.match        td{background:transparent;}
+.dt tr.name_mismatch td{background:#2d1515;}
+.dt tr.input_drift  td{background:#2d2700;}
+.dt tr.output_drift td{background:#2d2900;}
+.dt tr.missing      td{background:#181830;}
+.di-match{color:var(--vsc-green);}
+.di-name_mismatch{color:var(--vsc-red);}
+.di-input_drift,.di-output_drift{color:var(--vsc-yellow);}
+.di-missing{color:var(--vsc-muted);}
+.dt-fn{font-family:var(--font-code);color:var(--vsc-blue);}
+.dt-out{font-size:10px;color:var(--vsc-muted);margin-top:2px;}
+.dt-drift{background:#3a3000;color:var(--vsc-yellow);border-radius:2px;padding:1px 4px;}
+
+/* ── Diff selector (in dbgbar) ─────────────────────────────────────── */
+#diff-ctl{
+  display:flex;align-items:center;gap:6px;margin-left:8px;
+}
+#diff-ctl label{font-size:11px;color:var(--vsc-muted);}
+#diff-sel{
+  background:var(--vsc-input-bg);border:1px solid var(--vsc-border);
+  color:var(--vsc-text);border-radius:3px;padding:2px 6px;
+  font-size:11px;cursor:pointer;max-width:180px;
+}
+#btn-diff-run,.dbg-btn-blue{
+  background:var(--vsc-accent);border:none;border-radius:3px;
+  color:#fff;padding:3px 10px;font-size:11px;cursor:pointer;
+}
+#btn-diff-run:hover{background:var(--vsc-accent-hover);}
+
+/* ── Status bar ────────────────────────────────────────────────────── */
+#statusbar{
+  grid-area:stat;background:var(--vsc-status);
+  display:flex;align-items:center;padding:0 10px;gap:16px;
+  font-size:11px;color:var(--vsc-status-text);
+}
+.sb-item{display:flex;align-items:center;gap:4px;opacity:.9;}
+.sb-item:hover{opacity:1;cursor:default;}
+.sb-sep{opacity:.4;}
+
+/* ── Empty state ────────────────────────────────────────────────────── */
+.empty-state{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;color:var(--vsc-muted);gap:8px;
+}
+.empty-state .es-icon{font-size:48px;opacity:.3;}
+.empty-state .es-msg{font-size:13px;}
+
+/* ── Scrollbars ─────────────────────────────────────────────────────── */
+::-webkit-scrollbar{width:6px;height:6px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:var(--vsc-scrollbar);border-radius:3px;}
+
+/* ── Toast ──────────────────────────────────────────────────────────── */
+#toast{
+  position:fixed;bottom:30px;right:20px;
+  background:#252526;border:1px solid var(--vsc-border);
+  border-radius:4px;padding:8px 14px;font-size:12px;
+  transform:translateY(60px);transition:transform .2s;z-index:99;
+  max-width:340px;
+}
+#toast.show{transform:translateY(0);}
+#toast.err{border-color:var(--vsc-red);}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ── Activity bar ───────────────────────────────────────────── -->
+<div id="actbar">
+  <div class="act-icon ico-explorer active" title="Explorer" onclick="setView('explorer')"></div>
+  <div class="act-icon ico-debug"    title="Time-Travel Debugger" onclick="setView('debug')"></div>
+  <div class="act-icon ico-diff"     title="Diff Tool" onclick="setView('diff')"></div>
+  <div style="flex:1"></div>
+  <div class="act-icon ico-settings" title="Settings"></div>
+</div>
+
+<!-- ── Tab bar ────────────────────────────────────────────────── -->
+<div id="tabbar">
+  <div class="tab active" id="tab-main">
+    <div class="tab-dot" id="tab-dot" style="background:var(--vsc-muted)"></div>
+    <span id="tab-title">No trace selected</span>
+    <span class="tab-fn" id="tab-fn"></span>
+    <span class="tab-close">×</span>
+  </div>
+  <div id="tab-breadcrumb">
+    <span id="bc-trace"></span>
+    <span id="bc-sep" style="display:none">›</span>
+    <span id="bc-fn"></span>
+  </div>
+</div>
+
+<!-- ── Debug / scrub bar ──────────────────────────────────────── -->
+<div id="dbgbar">
+  <!-- Replay -->
+  <button class="dbg-btn" id="btn-replay" title="Replay trace" onclick="replayTrace()" disabled>▶</button>
+  <div class="dbg-sep"></div>
+  <!-- Step controls -->
+  <button class="dbg-btn" id="btn-first"  title="First frame"    onclick="scrubTo(0)" disabled>⏮</button>
+  <button class="dbg-btn" id="btn-prev"   title="Step backward"  onclick="stepBy(-1)" disabled>⏪</button>
+  <button class="dbg-btn" id="btn-next"   title="Step forward"   onclick="stepBy(1)"  disabled>⏩</button>
+  <button class="dbg-btn" id="btn-last"   title="Last frame"     onclick="scrubToLast()" disabled>⏭</button>
+  <div class="dbg-sep"></div>
+  <!-- Scrubber -->
+  <input type="range" id="scr-range" min="0" max="0" value="0"
+         oninput="scrubTo(+this.value)" disabled />
+  <span id="scr-counter">— / —</span>
+  <span id="scr-fn"></span>
+  <div class="dbg-sep"></div>
+  <!-- Diff controls -->
+  <div id="diff-ctl">
+    <label>Diff vs:</label>
+    <select id="diff-sel"><option value="">— select —</option></select>
+    <button id="btn-diff-run" onclick="runDiff()">Diff</button>
+  </div>
+</div>
+
+<!-- ── Main content ───────────────────────────────────────────── -->
+<div id="main">
+
+  <!-- Sidebar -->
+  <div id="sidebar">
+    <div class="section-header">
+      TRACES &amp; SESSIONS
+      <span class="sh-count" id="trace-count"></span>
+    </div>
+    <div id="search-wrap">
+      <input id="search-input" type="search" placeholder="Filter traces…" oninput="filterTraces()"/>
+    </div>
+    <div id="trace-list"></div>
+  </div>
+
+  <!-- Editor area -->
+  <div id="editor-area">
+
+    <!-- Call tree pane -->
+    <div id="tree-pane">
+      <div class="section-header">CALL HIERARCHY</div>
+      <div id="tree-scroll">
+        <div class="empty-state" style="padding:40px 0">
+          <div class="es-icon">⎇</div>
+          <div class="es-msg">Select a trace</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Inspector: inputs top, output/error bottom -->
+    <div id="inspector">
+      <div class="insp-half" id="insp-top">
+        <div class="editor-title">
+          <span>INPUTS</span>
+          <span class="et-fn" id="insp-fn-top"></span>
+          <span class="et-dur" id="insp-dur"></span>
+        </div>
+        <div class="code-editor" id="ce-inputs">
+          <div class="empty-state"><div class="es-icon">⌨</div><div class="es-msg">Select a frame</div></div>
+        </div>
+      </div>
+      <div class="insp-half" id="insp-bot">
+        <div class="editor-title">
+          <span id="insp-bot-label">RETURN VALUE</span>
+          <span class="et-fn" id="insp-status"></span>
+        </div>
+        <div class="code-editor" id="ce-output">
+          <div class="empty-state"><div class="es-icon">⏎</div><div class="es-msg">Select a frame</div></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Diff panel (replaces inspector when active) -->
+    <div id="diff-panel">
+      <div id="diff-hdr">
+        <span>Diff &nbsp;<span class="dh-tid" id="dh-t1"></span></span>
+        <span>vs &nbsp;<span class="dh-tid" id="dh-t2"></span></span>
+        <span id="diff-summary"></span>
+        <button id="diff-close-btn" onclick="closeDiff()" title="Close diff">×</button>
+      </div>
+      <div id="diff-scroll">
+        <table class="dt">
+          <thead>
+            <tr>
+              <th>#</th><th>⚡</th>
+              <th>Trace A &mdash; Function</th><th>Inputs A</th>
+              <th>Trace B &mdash; Function</th><th>Inputs B</th>
+            </tr>
+          </thead>
+          <tbody id="diff-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- #editor-area -->
+</div><!-- #main -->
+
+<!-- ── Status bar ─────────────────────────────────────────────── -->
+<div id="statusbar">
+  <div class="sb-item">⚙ RetroTrace Studio</div>
+  <div class="sb-sep">|</div>
+  <div class="sb-item" id="sb-db">DB: .retrotrace.db</div>
+  <div class="sb-sep">|</div>
+  <div class="sb-item" id="sb-events">0 events</div>
+  <div class="sb-sep">|</div>
+  <div class="sb-item" id="sb-engine">Engine: ready</div>
+  <div style="flex:1"></div>
+  <div class="sb-item">UTF-8</div>
+  <div class="sb-item">Python</div>
+</div>
+
+</div><!-- #app -->
+<div id="toast"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════
+   RetroTrace Studio — VS Code-themed offline frontend
+   ════════════════════════════════════════════════════════════════════ */
+
+// ── State ──────────────────────────────────────────────────────────
+let allTraces    = [];
+let filteredTraces = [];
+let activeTrace  = null;   // TraceDetail
+let activeStep   = 0;
+let timeline     = [];     // flat EventSchema[]
+
+// ── Boot ───────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  loadTraces();
+  setInterval(loadTraces, 5000);
+});
+
+// ── Fetch helpers ──────────────────────────────────────────────────
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ── Load trace list ────────────────────────────────────────────────
+async function loadTraces() {
+  try {
+    const traces = await api('/api/traces');
+    allTraces = traces;
+    filteredTraces = traces;
+    renderSidebar(traces);
+    populateDiffSel(traces);
+    const total = traces.reduce((s, t) => s + t.total_events, 0);
+    document.getElementById('sb-events').textContent = `${total} total events`;
+    document.getElementById('trace-count').textContent = traces.length ? `(${traces.length})` : '';
+  } catch (e) {
+    toast('Failed to load traces: ' + e.message, true);
+  }
+}
+
+// ── Filter ─────────────────────────────────────────────────────────
+function filterTraces() {
+  const q = document.getElementById('search-input').value.toLowerCase();
+  filteredTraces = q
+    ? allTraces.filter(t => t.root_function.toLowerCase().includes(q) ||
+                            t.trace_id.includes(q))
+    : allTraces;
+  renderSidebar(filteredTraces);
+}
+
+// ── Sidebar ─────────────────────────────────────────────────────────
+function renderSidebar(traces) {
+  const list = document.getElementById('trace-list');
+  if (!traces.length) {
+    list.innerHTML =
+      '<div style="padding:20px 12px;color:var(--vsc-muted);font-size:12px">' +
+      'No traces yet.<br>Run a <code style="color:var(--vsc-blue)">@record</code>-decorated function.</div>';
+    return;
+  }
+  list.innerHTML = '';
+  traces.forEach(t => {
+    const ok = !t.has_error;
+    const d  = new Date(t.started_at);
+    const ts = d.toLocaleTimeString();
+    const dur = t.duration_ms.toFixed(1);
+    const row = document.createElement('div');
+    row.className = 'trace-row' + (activeTrace?.trace_id === t.trace_id ? ' active' : '');
+    row.dataset.id = t.trace_id;
+    row.innerHTML =
+      `<div class="tr-badge ${ok ? 'ok' : 'err'}">${ok ? '✓' : '✗'}</div>` +
+      `<div class="tr-body">` +
+        `<div class="tr-fn" title="${esc(t.root_function)}">${esc(t.root_function)}</div>` +
+        `<div class="tr-meta">${ts} · ${t.total_events} events · ${dur}ms` +
+          (t.has_error ? '<span class="tr-tag">ERR</span>' : '') +
+        `</div>` +
+      `</div>`;
+    row.onclick = () => selectTrace(t.trace_id);
+    list.appendChild(row);
+  });
+}
+
+function populateDiffSel(traces) {
+  const sel = document.getElementById('diff-sel');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">— select —</option>';
+  traces.forEach(t => {
+    const o = document.createElement('option');
+    o.value = t.trace_id;
+    o.textContent = t.root_function.substring(0, 22) + ' ' + t.trace_id.substring(0, 8);
+    sel.appendChild(o);
+  });
+  sel.value = prev;
+}
+
+// ── Select trace ───────────────────────────────────────────────────
+async function selectTrace(traceId) {
+  try {
+    closeDiff();
+    const detail = await api(`/api/traces/${traceId}`);
+    activeTrace = detail;
+    timeline = detail.events || [];
+    activeStep = 0;
+
+    // sidebar highlight
+    document.querySelectorAll('.trace-row').forEach(r =>
+      r.classList.toggle('active', r.dataset.id === traceId));
+
+    // tab
+    const ok = !detail.has_error;
+    document.getElementById('tab-dot').style.background =
+      ok ? 'var(--vsc-green)' : 'var(--vsc-red)';
+    document.getElementById('tab-title').textContent =
+      traceId.substring(0, 8) + '…';
+    document.getElementById('bc-trace').textContent = traceId.substring(0, 8) + '…';
+    document.getElementById('bc-sep').style.display = '';
+
+    // scrubber
+    enableControls(timeline.length);
+    renderTimeline();
+    renderTree(detail.tree || []);
+    renderFrame(timeline[0] || null);
+    updateBreadcrumb(timeline[0]);
+    document.getElementById('sb-engine').textContent = 'Engine: loaded';
+  } catch (e) {
+    toast('Failed to load trace: ' + e.message, true);
+  }
+}
+
+// ── Scrubber controls ──────────────────────────────────────────────
+function enableControls(len) {
+  ['btn-replay','btn-first','btn-prev','btn-next','btn-last','scr-range']
+    .forEach(id => document.getElementById(id).disabled = !len);
+}
+
+function renderTimeline() {
+  const range = document.getElementById('scr-range');
+  range.max   = Math.max(0, timeline.length - 1);
+  range.value = 0;
+  updateCounter(0);
+}
+
+function scrubTo(idx) {
+  idx = Math.max(0, Math.min(idx, timeline.length - 1));
+  activeStep = idx;
+  document.getElementById('scr-range').value = idx;
+  updateCounter(idx);
+  renderFrame(timeline[idx]);
+  updateBreadcrumb(timeline[idx]);
+  highlightTree(timeline[idx]?.event_id);
+}
+
+function stepBy(d) { scrubTo(activeStep + d); }
+function scrubToLast() { scrubTo(timeline.length - 1); }
+
+function updateCounter(idx) {
+  document.getElementById('scr-counter').textContent =
+    `${idx + 1} / ${timeline.length}`;
+  const ev = timeline[idx];
+  document.getElementById('scr-fn').textContent = ev ? ev.function_name : '';
+}
+
+function updateBreadcrumb(ev) {
+  document.getElementById('bc-fn').textContent = ev ? ev.function_name : '';
+  document.getElementById('tab-fn').textContent = ev ? `(${ev.function_name})` : '';
+}
+
+// ── Call tree ──────────────────────────────────────────────────────
+function renderTree(roots) {
+  const scroll = document.getElementById('tree-scroll');
+  scroll.innerHTML = '';
+  if (!roots.length) {
+    scroll.innerHTML = '<div class="empty-state" style="padding:40px 0"><div class="es-icon">⎇</div></div>';
+    return;
+  }
+  roots.forEach(r => scroll.appendChild(makeTreeNode(r, 0)));
+}
+
+function makeTreeNode(node, depth) {
+  const wrap = document.createElement('div');
+  const hasChildren = node.children && node.children.length > 0;
+  const ok = !node.has_error;
+
+  const tn = document.createElement('div');
+  tn.className = 'tn';
+  tn.dataset.id = node.event_id;
+  tn.style.paddingLeft = (depth * 16 + 4) + 'px';
+  tn.innerHTML =
+    `<div class="tn-inner">` +
+      `<span class="tn-chevron">${hasChildren ? '&#9660;' : ''}</span>` +
+      `<span class="tn-icon ${ok ? 'ok' : 'err'}">${ok ? '✓' : '✗'}</span>` +
+      `<span class="tn-label" title="${esc(node.function_name)}">${esc(node.function_name)}</span>` +
+      `<span class="tn-dur">${node.duration_ms.toFixed(1)}ms</span>` +
+    `</div>`;
+
+  tn.onclick = e => {
+    e.stopPropagation();
+    const idx = timeline.findIndex(ev => ev.event_id === node.event_id);
+    if (idx >= 0) scrubTo(idx);
+    if (hasChildren) {
+      childWrap.style.display = childWrap.style.display === 'none' ? '' : 'none';
+      tn.querySelector('.tn-chevron').innerHTML =
+        childWrap.style.display === 'none' ? '&#9654;' : '&#9660;';
+    }
+  };
+  wrap.appendChild(tn);
+
+  if (hasChildren) {
+    const childWrap = document.createElement('div');
+    childWrap.className = 'tn-children';
+    node.children.forEach(c => childWrap.appendChild(makeTreeNode(c, depth + 1)));
+    wrap.appendChild(childWrap);
+  }
+  return wrap;
+}
+
+function highlightTree(eventId) {
+  document.querySelectorAll('.tn').forEach(n =>
+    n.classList.toggle('selected', n.dataset.id === eventId));
+}
+
+// ── Frame inspector ────────────────────────────────────────────────
+function renderFrame(ev) {
+  const topEl = document.getElementById('ce-inputs');
+  const botEl = document.getElementById('ce-output');
+  const botLbl = document.getElementById('insp-bot-label');
+  const statusEl = document.getElementById('insp-status');
+  const fnEl = document.getElementById('insp-fn-top');
+  const durEl = document.getElementById('insp-dur');
+
+  if (!ev) {
+    topEl.innerHTML = '<div class="empty-state"><div class="es-icon">⌨</div><div class="es-msg">Select a frame</div></div>';
+    botEl.innerHTML = '<div class="empty-state"><div class="es-icon">⏎</div><div class="es-msg">Select a frame</div></div>';
+    fnEl.textContent = '';
+    durEl.textContent = '';
+    statusEl.textContent = '';
+    return;
+  }
+
+  fnEl.textContent = ev.function_name;
+  durEl.textContent = ev.duration_ms.toFixed(3) + ' ms';
+
+  // Inputs panel
+  const inputsJson = JSON.stringify(ev.inputs, null, 2);
+  const lines = inputsJson.split('\n');
+  topEl.innerHTML = mkEditor(lines, inputsJson, false);
+
+  // Output / error panel
+  if (ev.error) {
+    botLbl.textContent = 'TRACEBACK';
+    statusEl.innerHTML = '<span style="color:var(--vsc-red)">✗ ERROR</span>';
+    botEl.innerHTML = `<div class="error-block">${esc(ev.error)}</div>`;
+  } else {
+    botLbl.textContent = 'RETURN VALUE';
+    statusEl.innerHTML = '<span style="color:var(--vsc-green)">✓ OK</span>';
+    const outJson = JSON.stringify(ev.output, null, 2);
+    const outLines = outJson.split('\n');
+    botEl.innerHTML = mkEditor(outLines, outJson, false);
+  }
+}
+
+function mkEditor(lines, raw, isError) {
+  const nums = lines.map((_, i) =>
+    `<span class="line-num">${i + 1}</span>`
+  ).join('');
+  return `
+    <div class="line-nums">${nums}</div>
+    <div class="code-body"><pre>${syntaxHL(raw)}</pre></div>`;
+}
+
+// ── JSON syntax highlighter ────────────────────────────────────────
+function syntaxHL(str) {
+  return esc(str).replace(
+    /(&quot;[^&]*&quot;)\s*:/g,       (_, k) => `<span class="j-key">${k}</span>:`
+  ).replace(
+    /:\s*(&quot;[^&]*&quot;)/g,       (m, v) => m.replace(v, `<span class="j-str">${v}</span>`)
+  ).replace(
+    /:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/g,
+                                       (m, v) => m.replace(v, `<span class="j-num">${v}</span>`)
+  ).replace(
+    /:\s*(true|false)/g,              (m, v) => m.replace(v, `<span class="j-bool">${v}</span>`)
+  ).replace(
+    /:\s*(null)/g,                    (m, v) => m.replace(v, `<span class="j-null">${v}</span>`)
+  );
+}
+
+// ── Replay ─────────────────────────────────────────────────────────
+async function replayTrace() {
+  if (!activeTrace) return;
+  document.getElementById('sb-engine').textContent = 'Engine: replaying…';
+  try {
+    const d = await api(`/api/replay/${activeTrace.trace_id}`, { method: 'POST' });
+    if (d.success) {
+      toast('Replay: success ✓');
+      document.getElementById('sb-engine').textContent = 'Engine: replay OK';
+    } else {
+      toast('Replay error: ' + (d.error || '?'), true);
+      document.getElementById('sb-engine').textContent = 'Engine: replay failed';
+    }
+  } catch (e) {
+    toast('Replay failed: ' + e.message, true);
+    document.getElementById('sb-engine').textContent = 'Engine: error';
+  }
+}
+
+// ── Diff ───────────────────────────────────────────────────────────
+async function runDiff() {
+  if (!activeTrace) { toast('Select a primary trace first.'); return; }
+  const t2 = document.getElementById('diff-sel').value;
+  if (!t2) { toast('Choose a trace to diff against.'); return; }
+
+  try {
+    const d = await api(`/api/diff?t1=${activeTrace.trace_id}&t2=${t2}`);
+    document.getElementById('dh-t1').textContent = d.trace_id_1.substring(0, 8) + '…';
+    document.getElementById('dh-t2').textContent = d.trace_id_2.substring(0, 8) + '…';
+    document.getElementById('diff-summary').textContent =
+      d.identical ? '✓ Identical' : `⚡ ${d.divergences} divergence(s)`;
+
+    const icons = {
+      match:         '<span class="di-match">✓</span>',
+      name_mismatch: '<span class="di-name_mismatch">✗</span>',
+      input_drift:   '<span class="di-input_drift">~</span>',
+      output_drift:  '<span class="di-output_drift">~</span>',
+      missing:       '<span class="di-missing">±</span>',
+    };
+
+    document.getElementById('diff-tbody').innerHTML = d.events.map(ev => {
+      const ia = ev.inputs_a ? JSON.stringify(ev.inputs_a) : '—';
+      const ib = ev.inputs_b ? JSON.stringify(ev.inputs_b) : '—';
+      const oa = ev.output_a != null ? JSON.stringify(ev.output_a) : '—';
+      const ob = ev.output_b != null ? JSON.stringify(ev.output_b) : '—';
+      const drifted = ev.status !== 'match';
+      return `<tr class="${ev.status}">
+        <td style="color:var(--vsc-muted);font-family:var(--font-code)">${ev.index}</td>
+        <td>${icons[ev.status] || ev.status}</td>
+        <td><span class="dt-fn">${esc(ev.function_a || '—')}</span>
+            <div class="dt-out">→ ${esc(oa)}</div></td>
+        <td style="font-family:var(--font-code);font-size:11px">${esc(ia)}</td>
+        <td><span class="dt-fn">${esc(ev.function_b || '—')}</span>
+            <div class="dt-out">→ ${esc(ob)}</div></td>
+        <td style="font-family:var(--font-code);font-size:11px">${
+          drifted && ia !== ib
+            ? `<span class="dt-drift">${esc(ib)}</span>` : esc(ib)
+        }</td>
+      </tr>`;
+    }).join('');
+
+    document.getElementById('inspector').style.display = 'none';
+    document.getElementById('tree-pane').style.display = 'none';
+    document.getElementById('diff-panel').classList.add('open');
+  } catch (e) {
+    toast('Diff failed: ' + e.message, true);
+  }
+}
+
+function closeDiff() {
+  document.getElementById('diff-panel').classList.remove('open');
+  document.getElementById('inspector').style.display = '';
+  document.getElementById('tree-pane').style.display = '';
+}
+
+// ── View switching (activity bar) ──────────────────────────────────
+function setView(v) {
+  document.querySelectorAll('.act-icon').forEach(el => el.classList.remove('active'));
+  event.currentTarget.classList.add('active');
+  if (v === 'diff' && activeTrace) runDiff();
+  if (v === 'explorer' || v === 'debug') closeDiff();
+}
+
+// ── Utils ──────────────────────────────────────────────────────────
+function esc(str) {
+  return String(str ?? '')
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+let _toastTimer;
+function toast(msg, isErr = false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => el.className = '', 3200);
+}
+</script>
+</body>
+</html>
